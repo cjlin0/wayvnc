@@ -1,4 +1,4 @@
-name: Build Partially Static wayvnc Binary
+name: Static neatvnc/aml for UB24
 
 on:
   workflow_dispatch:

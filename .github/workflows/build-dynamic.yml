@@ -1,4 +1,4 @@
-name: Build Portable wayvnc Binary
+name: Build wayvnc for ubuntu-latest
 
 on:
   workflow_dispatch: # Allows you to manually trigger this anytime
