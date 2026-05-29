@@ -1,0 +1,38 @@
+name: Build Portable wayvnc Binary
+
+on:
+  workflow_dispatch: # Allows you to manually trigger this anytime
+
+jobs:
+  dist-build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Forked Code
+      uses: actions/checkout@v4
+      with:
+        submodules: false # We handle the target fallback repos manually below
+
+    - name: Install System Build Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y git meson ninja-build libdrm-dev libxkbcommon-dev \
+          libwlroots-dev libjansson-dev libpam0g-dev libgnutls28-dev \
+          libavfilter-dev libavcodec-dev libavutil-dev libturbojpeg0-dev scdoc
+
+    - name: Pull Required Upstream Subprojects
+      run: |
+        mkdir -p subprojects
+        git clone https://github.com/any1/neatvnc.git subprojects/neatvnc
+        git clone https://github.com/any1/aml.git subprojects/aml
+
+    - name: Build Isolated Toolchain
+      run: |
+        meson setup build --prefix=$GITHUB_WORKSPACE/wayvnc-target --wrap-mode=forcefallback
+        ninja -C build install
+
+    - name: Pack and Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: wayvnc-custom-build-amd64
+        path: ${{ github.workspace }}/wayvnc-target/
