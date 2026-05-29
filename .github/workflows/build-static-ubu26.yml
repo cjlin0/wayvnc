@@ -1,0 +1,49 @@
+name: Build Partially Static wayvnc Binary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dist-build:
+    runs-on: ubuntu-26.04
+    container:
+      image: ubuntu:26.04
+
+    steps:
+    - name: Install Git
+      run: |
+        apt update
+        apt install -y git
+
+    - name: Checkout Forked Code
+      uses: actions/checkout@v4
+      with:
+        submodules: false
+
+    - name: Install System Build Dependencies
+      run: |
+        apt install -y meson ninja-build libdrm-dev libxkbcommon-dev \
+          libwlroots-dev libjansson-dev libpam0g-dev libgnutls28-dev \
+          libavfilter-dev libavcodec-dev libavutil-dev libturbojpeg0-dev scdoc
+
+    - name: Pull Required Upstream Subprojects
+      run: |
+        mkdir -p subprojects
+        git clone https://github.com/any1/neatvnc.git subprojects/neatvnc
+        git clone https://github.com/any1/aml.git subprojects/aml
+
+    - name: Build with Static Subprojects
+      run: |
+        # --default-library=static tells Meson to compile aml and neatvnc as static libraries (.a) 
+        # and embed them directly inside the final wayvnc executable binary.
+        meson setup build \
+          --prefix=$GITHUB_WORKSPACE/wayvnc-target \
+          --wrap-mode=forcefallback \
+          --default-library=static
+        ninja -C build install
+
+    - name: Pack and Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: wayvnc-partially-static-amd64
+        path: ${{ github.workspace }}/wayvnc-target/
