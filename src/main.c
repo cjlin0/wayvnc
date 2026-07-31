@@ -158,6 +158,8 @@ struct wayvnc {
 	// image source observers
 	struct observer power_change_observer;
 	struct observer destruction_observer;
+
+	struct aml_idle* deferred_detach;
 };
 
 struct wayvnc_client {
@@ -201,6 +203,32 @@ struct wayland* wayland = NULL;
 
 extern struct screencopy_impl wlr_screencopy_impl, ext_image_copy_capture_impl;
 
+static void cancel_deferred_detach(struct wayvnc* self)
+{
+	if (!self->deferred_detach)
+		return;
+	aml_stop(aml_get_default(), self->deferred_detach);
+	aml_unref(self->deferred_detach);
+	self->deferred_detach = NULL;
+}
+
+static void handle_wayland_detach(struct aml_idle* idle)
+{
+	struct wayvnc* self = aml_get_userdata(idle);
+	assert(self->deferred_detach == idle);
+	cancel_deferred_detach(self);
+	wayland_detach(self);
+}
+
+static void schedule_wayland_detach(struct wayvnc* self)
+{
+	if (self->deferred_detach)
+		return;
+	struct aml_idle* idle = aml_idle_new(handle_wayland_detach, self, NULL);
+	aml_start(aml_get_default(), idle);
+	self->deferred_detach = idle;
+}
+
 static void on_output_added(struct observer* observer, void* data)
 {
 	struct wayvnc* self = wl_container_of(observer, self,
@@ -208,7 +236,13 @@ static void on_output_added(struct observer* observer, void* data)
 	struct output* output = data;
 	ctl_server_event_output_added(self->ctl, output_get_name(output));
 
-	if (image_source_is_desktop(self->image_source)) {
+	cancel_deferred_detach(self);
+
+	if (self->image_source_type == IMAGE_SOURCE_TYPE_OUTPUT ||
+			self->image_source_type == IMAGE_SOURCE_TYPE_UNSPEC) {
+		if (!self->image_source)
+			switch_to_output(self, output);
+	} else if (self->image_source_type == IMAGE_SOURCE_TYPE_DESKTOP) {
 		wayvnc_desktop_display_add(self, &output->image_source);
 	}
 }
@@ -219,7 +253,7 @@ static void on_output_removed(struct observer* observer, void* data)
 			output_removed_observer);
 	struct output* out = data;
 
-	if (image_source_is_output(self->image_source) &&
+	if (self->image_source && image_source_is_output(self->image_source) &&
 			out == output_from_image_source(self->image_source)) {
 		nvnc_log(NVNC_LOG_WARNING, "Selected output %s went away",
 				output_get_name(out));
@@ -230,11 +264,12 @@ static void on_output_removed(struct observer* observer, void* data)
 
 	ctl_server_event_output_removed(self->ctl, output_get_name(out));
 
-	if (image_source_is_output(self->image_source) &&
+	if (self->image_source && image_source_is_output(self->image_source) &&
 			out == output_from_image_source(self->image_source)) {
 		if (self->start_detached) {
 			nvnc_log(NVNC_LOG_WARNING, "No fallback outputs left. Detaching...");
-			wayland_detach(self);
+			self->image_source = NULL;
+			schedule_wayland_detach(self);
 		} else {
 			nvnc_log(NVNC_LOG_ERROR, "No fallback outputs left. Exiting...");
 			wayvnc_exit(self);
@@ -282,6 +317,7 @@ static void wayvnc_display_list_detach(struct wayvnc_display_list* list)
 static void wayland_detach(struct wayvnc* self)
 {
 	wayland_destroy(wayland);
+	wayland = NULL;
 }
 
 static void on_wayland_destroyed(struct observer* observer, void* data)
@@ -1138,7 +1174,6 @@ static void on_desktop_output_destroyed(struct observer* observer, void* data)
 	struct wayvnc_display* self = wl_container_of(observer, self,
 			destruction_observer);
 	struct wayvnc* wayvnc = self->wayvnc;
-	nvnc_remove_display(wayvnc->nvnc, self->nvnc_display);
 	wayvnc_display_destroy(self);
 
 	if (!wayland || !wl_list_empty(&wayland->outputs))
@@ -1146,7 +1181,7 @@ static void on_desktop_output_destroyed(struct observer* observer, void* data)
 
 	if (wayvnc->start_detached) {
 		nvnc_log(NVNC_LOG_WARNING, "No desktop outputs left. Detaching...");
-		wayland_detach(wayvnc);
+		schedule_wayland_detach(wayvnc);
 	} else {
 		nvnc_log(NVNC_LOG_ERROR, "No desktop outputs left. Exiting...");
 		wayvnc_exit(wayvnc);
@@ -2152,14 +2187,18 @@ void set_image_source(struct wayvnc* self, struct image_source* image_source)
 
 void switch_to_output(struct wayvnc* self, struct output* output)
 {
-	assert(image_source_is_output(self->image_source));
-	if (output_from_image_source(self->image_source) == output) {
-		nvnc_log(NVNC_LOG_INFO, "Already selected output %s",
-				output_get_name(output));
-		return;
+	if (self->image_source) {
+		assert(image_source_is_output(self->image_source));
+		struct output* current_output =
+			output_from_image_source(self->image_source);
+		if (current_output == output) {
+			nvnc_log(NVNC_LOG_DEBUG, "Already selected output %s",
+					output_get_name(output));
+			return;
+		}
+		screencopy_stop(self->screencopy);
+		output_release_power_on(current_output);
 	}
-	screencopy_stop(self->screencopy);
-	output_release_power_on(output);
 	set_image_source(self, &output->image_source);
 	configure_screencopy(self);
 	reinitialise_pointers(self);
@@ -2227,6 +2266,9 @@ static struct cmd_response* on_attach(struct ctl* ctl, const char* display,
 	wayvnc_display_list_init(self);
 	blank_screen(self);
 
+	if (!ok)
+		goto out;
+
 	struct nvnc_client* nvnc_client;
 	for (nvnc_client = nvnc_client_first(self->nvnc); nvnc_client;
 			nvnc_client = nvnc_client_next(nvnc_client)) {
@@ -2244,6 +2286,7 @@ static struct cmd_response* on_attach(struct ctl* ctl, const char* display,
 
 	nvnc_set_log_fn_thread_local(NULL);
 
+out:
 	return ok ? cmd_ok() : cmd_failed("%s", intercepted_error);
 }
 
@@ -2723,6 +2766,8 @@ int main(int argc, char* argv[])
 
 	nvnc_log(NVNC_LOG_INFO, "Exiting...");
 
+	cancel_deferred_detach(&self);
+
 	ctl_server_destroy(self.ctl);
 	self.ctl = NULL;
 
@@ -2730,6 +2775,7 @@ int main(int argc, char* argv[])
 	nvnc_del(self.nvnc);
 	self.nvnc = NULL;
 	wayland_destroy(wayland);
+	wayland = NULL;
 
 	aml_stop(aml, self.rate_limiter);
 	aml_unref(self.rate_limiter);

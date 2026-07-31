@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
+#include <sys/param.h>
 #include "json-ipc.h"
 
 static const char* jsonipc_id_key = "id";
@@ -207,7 +208,7 @@ json_t* jprintf(const char* fmt, ...)
 
 json_t* jvprintf(const char* fmt, va_list ap)
 {
-	char buffer[128];
+	char buffer[256];
 	int len = vsnprintf(buffer, sizeof(buffer), fmt, ap);
-	return json_stringn(buffer, len);
+	return json_stringn(buffer, MIN(sizeof(buffer) - 1, len));
 }
